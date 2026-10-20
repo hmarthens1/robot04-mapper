@@ -13,8 +13,8 @@ and save the maps. Separate from robot-fleet-gui on purpose: one robot, one job.
 | Drive | hold **W A S D** or the arrow keys (or the on-screen buttons); **Space** or STOP stops. Sends `cmd_vel` at 10 Hz only while held; speed/turn sliders are % of the robot's max speed |
 | Map | Hector's `/map`, the robot (green), its path (blue), the live scan (red). Wheel zoom, drag pan, double-click follow |
 | SLAM | **Start SLAM** runs `ros2 launch robot04_slam hector.launch.py` (from `~/hector_ws`); **New map** resets it; **Open RViz** for the full view |
-| Save | to `~/Desktop/robot04_maps/<name>.{pgm,yaml,png,json}`: map_server format (Nav2 loads the yaml), a PNG with the path, and notes (size, explored area, path length). SLAM logs go to `logs/` there |
-| Explore | **Start nav stack on robot** runs `systemctl --user start robot-explore` on the robot over ssh (`ROBOT_SSH`, default `ubuntu@192.168.0.21`): Hector SLAM + Nav2 + explorer, all on the Pi. **Explore** / **Pause** / **Return home** steer it; the map then shows Nav2's plan (green), the goal (magenta ×), the frontiers (cyan) and the start (yellow). Any drive key, a drive button, Space or STOP pauses the explorer first. Don't press Start SLAM while it runs: the robot has its own |
+| Save | to `~/Desktop/robot04_maps/<name>.{pgm,yaml,png,json}`: map_server format (Nav2 loads the yaml), a PNG with the path, and notes (size, explored area, path length, mapping time). The ⏱ timer runs by itself while SLAM is live (poses arriving, wherever SLAM runs) and pauses when it stops; Start SLAM and New map reset it; Pause holds it until Start or Reset; its time goes into the json (`mapping_time_s`, plus `explorer_elapsed_s` for autonomous runs). SLAM logs go to `logs/` there |
+| Explore | **Start nav stack on robot** runs `systemctl --user start robot-explore` on the robot over ssh (`ROBOT_SSH`, default `ubuntu@192.168.0.21`; on a network without IPv4 for the robot, set it to `ubuntu@<ipv6>%<interface>`): Hector SLAM + Nav2 + explorer, all on the Pi. **Explore** / **Pause** / **Return home** steer it; the map then shows Nav2's plan (green), the goal (magenta ×), the frontiers (cyan) and the start (yellow). Any drive key, a drive button, Space or STOP pauses the explorer first. Don't press Start SLAM while it runs: the robot has its own |
 
 Safety lives on the robot, not here: `robot_node` stops 0.5 s after the last `cmd_vel`,
 refuses to drive towards an obstacle closer than 0.25 m (lidar, ±25° front/back), and the
@@ -25,6 +25,20 @@ Mapping tips: drive slowly and turn slowly (Hector has no odometry and loses tra
 fast turns, especially at the MS200's 10 Hz); revisit the start before saving; long bare
 corridors drift.
 
-Needs: ROS 2 Humble, PyQt5, numpy (Ubuntu packages), `~/hector_ws` built (hector_mapping
-port + robot04_slam), and on the robot `rpi5-robot-board` with the MS200 driver.
-ROS settings: `ROS_DOMAIN_ID=17`, Cyclone DDS (set in run.sh).
+## Install
+
+Needs ROS 2 (Humble or Jazzy), PyQt5 and numpy from Ubuntu, and the Hector SLAM workspace
+[robot04-hector-ws](https://github.com/hmarthens1/robot04-hector-ws) built in `~/hector_ws`
+(hector_mapping + robot04_slam). On the robot:
+[rpi5-robot-board](https://github.com/hmarthens1/rpi5-robot-board) (robot node, MS200 driver,
+camera bridge; `mentorpi_nav` for Explore).
+
+```bash
+sudo apt install -y python3-pyqt5 python3-numpy
+git clone https://github.com/hmarthens1/robot04-mapper.git ~/Desktop/robot04-mapper
+~/Desktop/robot04-mapper/run.sh                 # --robot <name> for another robot
+```
+
+ROS settings: `ROS_DOMAIN_ID=17`, Cyclone DDS (set in run.sh, override from the environment).
+Step-by-step lidar + Hector set-up: [Lab 04](https://hmarthens1.github.io/rpi5-ros2-rrclite/Lab_04/).
+

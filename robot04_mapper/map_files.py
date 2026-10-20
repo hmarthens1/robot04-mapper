@@ -3,7 +3,7 @@
   <name>.pgm   trinary image: 0 occupied, 254 free, 205 unknown (top row = highest y)
   <name>.yaml  image, resolution, origin, thresholds  (map_server / nav2_map_server)
   <name>.png   preview with the robot's path
-  <name>.json  when, robot, size, path length, final pose
+  <name>.json  when, robot, size, path length, final pose, mapping time
 
 The grid is cropped to the explored area (plus a margin) and the origin moved to match.
 """
@@ -21,7 +21,7 @@ from .map_view import known_bbox
 MAPS_DIR = os.path.expanduser("~/Desktop/robot04_maps")
 
 
-def save_map(grid, name, trail=(), pose=None, robot="robot04", folder=None):
+def save_map(grid, name, trail=(), pose=None, robot="robot04", folder=None, extra=None):
     folder = folder or MAPS_DIR
     os.makedirs(folder, exist_ok=True)
     base = os.path.join(folder, name)
@@ -79,6 +79,7 @@ def save_map(grid, name, trail=(), pose=None, robot="robot04", folder=None):
             "explored_m2": round(known * res * res, 1), "path_length_m": round(length, 2),
             "final_pose": [round(v, 3) for v in pose[:3]] if pose else None,
             "files": [name + e for e in (".pgm", ".yaml", ".png", ".json")]}
+    meta.update(extra or {})
     with open(base + ".json", "w") as f:
         json.dump(meta, f, indent=2)
     return base, meta

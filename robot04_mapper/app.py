@@ -29,7 +29,7 @@ KEYS = {Qt.Key_W: "f", Qt.Key_Up: "f", Qt.Key_S: "b", Qt.Key_Down: "b",
         Qt.Key_A: "l", Qt.Key_Left: "l", Qt.Key_D: "r", Qt.Key_Right: "r"}
 MIN_CLEARANCE = 0.25        # robot_node's min_clearance: closer than this it refuses to drive
 FRONT_HALF_ANGLE = math.radians(25)
-ROBOT_SSH = os.environ.get("ROBOT_SSH", "ubuntu@192.168.0.21")
+ROBOT_SSH = os.environ.get("ROBOT_SSH", "ubuntu@192.168.0.21")  # without IPv4: ubuntu@<ipv6>%<interface>
 EXPLORE_UNIT = "robot-explore"     # systemd --user unit on the robot (mentorpi_nav/systemd)
 
 
@@ -46,6 +46,39 @@ def clearance(scan):
                 back = min(back, r)
         a += scan.angle_increment
     return front, back
+
+
+def fmt_duration(secs):
+    h, rem = divmod(int(secs), 3600)
+    return ("%d:%02d:%02d" % (h, rem // 60, rem % 60)) if h else ("%d:%02d" % divmod(rem, 60))
+
+
+class Stopwatch:
+    """Mapping time: runs while SLAM is live, pausable by hand, reset by New map."""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.total = 0.0             # seconds accumulated before the current run
+        self.since = None            # monotonic start of the current run, None when paused
+        self.started_at = None       # wall clock of the first start
+
+    def start(self):
+        if self.since is None:
+            self.since = time.monotonic()
+            self.started_at = self.started_at or time.strftime("%Y-%m-%d %H:%M:%S")
+
+    def pause(self):
+        if self.since is not None:
+            self.total += time.monotonic() - self.since
+            self.since = None
+
+    @property
+    def running(self):
+        return self.since is not None
+
+    def elapsed(self):
+        return self.total + (time.monotonic() - self.since if self.since is not None else 0.0)
 
 
 def no_focus(w):
@@ -66,6 +99,8 @@ class MapperWindow(QMainWindow):
         self.rviz = None
         self.saved_seq = None         # map_seq at the last save
         self.last_image_t = None
+        self.stopwatch = Stopwatch()
+        self.timer_held = False       # paused by hand: don't restart on SLAM activity
         self.build_ui()
 
         self.drive_timer = QTimer(self, timeout=self.drive_tick)
@@ -220,10 +255,21 @@ class MapperWindow(QMainWindow):
         folder.clicked.connect(self.open_folder)
         row.addWidget(save)
         row.addWidget(folder)
-        self.save_info = QLabel("pgm + yaml (Nav2 map_server), png preview, json notes")
+        timer_row = QHBoxLayout()
+        self.timer_label = QLabel()
+        self.timer_label.setStyleSheet("font-family:monospace; font-size:18px; font-weight:bold;")
+        self.timer_button = no_focus(QPushButton("▶ Start"))
+        self.timer_button.clicked.connect(self.toggle_timer)
+        timer_reset = no_focus(QPushButton("Reset"))
+        timer_reset.clicked.connect(self.reset_timer)
+        timer_row.addWidget(self.timer_label, 1)
+        timer_row.addWidget(self.timer_button)
+        timer_row.addWidget(timer_reset)
+        self.save_info = QLabel("pgm + yaml (Nav2 map_server), png preview, json notes (with mapping time)")
         self.save_info.setStyleSheet("color:#888;")
         self.save_info.setWordWrap(True)
         v.addWidget(self.name_edit)
+        v.addLayout(timer_row)
         v.addLayout(row)
         v.addWidget(self.save_info)
         return box
@@ -308,6 +354,8 @@ class MapperWindow(QMainWindow):
             stdout=self.slam_log, stderr=subprocess.STDOUT, start_new_session=True)
         self.slam_started = time.monotonic()
         self.saved_seq = None
+        self.stopwatch.reset()
+        self.timer_held = False
         self.slam_button.setText("■ Stop SLAM")
         self.name_edit.setText(self.default_name())
 
@@ -335,6 +383,8 @@ class MapperWindow(QMainWindow):
             return
         self.bridge.reset_map()
         self.saved_seq = None
+        self.stopwatch.reset()
+        self.timer_held = False
         self.name_edit.setText(self.default_name())
 
     def open_rviz(self):
@@ -344,6 +394,31 @@ class MapperWindow(QMainWindow):
         cfg = os.path.join(cfg, "share", "robot04_slam", "rviz", "hector.rviz")
         self.rviz = subprocess.Popen(["rviz2", "-d", cfg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                      start_new_session=True)
+
+    # ================================================================== mapping timer
+    def toggle_timer(self):
+        if self.stopwatch.running:
+            self.stopwatch.pause()
+            self.timer_held = True
+        else:
+            self.stopwatch.start()
+            self.timer_held = False
+
+    def reset_timer(self):
+        self.stopwatch.reset()
+        self.timer_held = False
+
+    def timer_refresh(self, s, now):
+        # automatic: run while SLAM publishes poses (this PC, the robot, or a terminal)
+        live = s["slam_pose"] is not None and now - s["slam_pose"][3] < 2.0
+        if live and not self.timer_held:
+            self.stopwatch.start()
+        elif not live:
+            self.stopwatch.pause()
+        self.timer_label.setText("⏱ " + fmt_duration(self.stopwatch.elapsed()))
+        self.timer_label.setStyleSheet("font-family:monospace; font-size:18px; font-weight:bold; color:%s;"
+                                       % ("#2e7d32" if self.stopwatch.running else "#888"))
+        self.timer_button.setText("⏸ Pause" if self.stopwatch.running else "▶ Start")
 
     # ================================================================== exploration
     def stack_running(self):
@@ -415,15 +490,21 @@ class MapperWindow(QMainWindow):
         if os.path.exists(os.path.join(MAPS_DIR, name + ".yaml")) and QMessageBox.question(
                 self, "Save map", "%s already exists. Overwrite?" % name) != QMessageBox.Yes:
             return False
+        elapsed = self.stopwatch.elapsed()
+        extra = {"mapping_time_s": round(elapsed, 1), "mapping_time": fmt_duration(elapsed),
+                 "mapping_started": self.stopwatch.started_at}
+        st = s["explore"][0] if s["explore"] else None
+        if st and "elapsed_s" in st:
+            extra["explorer_elapsed_s"] = round(st["elapsed_s"], 1)
         try:
-            base, meta = save_map(s["map"], name, s["trail"], s["slam_pose"], self.robot)
+            base, meta = save_map(s["map"], name, s["trail"], s["slam_pose"], self.robot, extra=extra)
         except Exception as e:
             QMessageBox.warning(self, "Save map", "Could not save: %s" % e)
             return False
         self.saved_seq = s["map_seq"]
-        self.save_info.setText("saved %s  (%.1f × %.1f m, %.0f m² explored, path %.1f m)"
+        self.save_info.setText("saved %s  (%.1f × %.1f m, %.0f m² explored, path %.1f m, time %s)"
                                % (os.path.basename(base), meta["size_m"][0], meta["size_m"][1],
-                                  meta["explored_m2"], meta["path_length_m"]))
+                                  meta["explored_m2"], meta["path_length_m"], meta["mapping_time"]))
         self.save_info.setStyleSheet("color:#2e7d32;")
         return True
 
@@ -451,6 +532,7 @@ class MapperWindow(QMainWindow):
         self.video_info.setText("video %.0f fps" % self.bridge.rates["image"].hz())
 
         st = self.explore_refresh(s, now)
+        self.timer_refresh(s, now)
 
         # SLAM state + map
         running = self.slam_running() or st is not None
